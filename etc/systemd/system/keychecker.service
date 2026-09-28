@@ -1,0 +1,15 @@
+[Unit]
+Description=DM250 Fn key handler (fnkey)
+# The SysV version (/etc/init.d/keychecker) calls /opt/bin/fnkey without &, so ExecStart never returned;
+# it waited out the whole Type=forking + TimeoutSec=5min added by systemd-sysv-generator and ended up failed,
+# delaying boot completion by 5 minutes (the feature itself worked thanks to KillMode=process).
+# A unit with the same name in /etc/systemd/system/ takes precedence over what generator.late produces.
+
+[Service]
+Type=simple
+ExecStart=/opt/bin/fnkey
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

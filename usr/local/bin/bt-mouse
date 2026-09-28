@@ -1,0 +1,106 @@
+#!/bin/bash
+# 2026-09-19: run the UART at 1.5Mbps (--baudrate 1500000). At the default 115200bps, transmit tops out around 92kbps,
+#   and A2DP audio drops out and is full of noise. 3Mbps does not work because the chip cannot match the rate (1.5Mbps seems to be this unit's limit).
+# bt-mouse -- wake the BT chip and connect to a bonded LE mouse.
+#
+# Why a script is needed (details: https://zenn.dev/kay1974/articles/aa3143bed8f17d):
+#  1. /opt/bin/bt_switch on starts patchram 3 seconds after lifting rfkill, but
+#     the BCM43438 does not answer on the UART yet, so it keeps sending HCI_Reset and gives up. Moreover,
+#     bt_switch does not report the failure and prints "bluetooth switch ON".
+#     -> if hci0 does not appear, restart only patchram (the chip is already powered, so it succeeds)
+#  2. mgmt 1.3 lacks LOAD_CONN_PARAM, so the kernel's auto-connect cannot be used.
+#     -> even for bonded devices, connect explicitly from user space
+set -u
+
+FW=/opt/etc/firmware/BCM43438A1.hcd
+PATCHRAM=/opt/bin/brcm_patchram_plus
+NAME=${1:-${BT_MOUSE:-}}   # device name: argument, or BT_MOUSE in the environment
+if [ -z "$NAME" ]; then
+	echo "usage: bt-mouse DEVICE_NAME   (or set BT_MOUSE in the environment)" >&2
+	echo "bonded devices:" >&2
+	sudo grep -rh --include=info "^Name=" /var/lib/bluetooth/ 2>/dev/null | cut -d= -f2- | sort -u | sed "s/^/  /" >&2
+	exit 2
+fi
+
+have_hci0() { [ -d /sys/class/bluetooth/hci0 ]; }
+
+wait_hci0() {  # $1 = seconds to wait
+	local i
+	for ((i = 0; i < $1; i += 2)); do
+		sleep 2
+		have_hci0 && return 0
+	done
+	return 1
+}
+
+start_patchram() {
+	sudo sh -c "setsid $PATCHRAM --patchram $FW --baudrate 1500000 --enable_hci --no2bytes \
+		--tosleep 1000 /dev/ttyS0 >/dev/null 2>&1 &"
+}
+
+# --- 1. bring up hci0 ---
+if have_hci0; then
+	echo "hci0: already up"
+else
+	echo "hci0: powering on..."
+	sudo /opt/bin/bt_switch off >/dev/null 2>&1
+	sleep 5
+	sudo /opt/bin/bt_switch on >/dev/null || exit 1
+
+	# first try. The firmware upload takes nearly 50 seconds, so wait without interrupting it
+	if wait_hci0 70; then
+		echo "hci0: up on first try"
+	else
+		echo "hci0: first try timed out, retrying patchram"
+		sudo pkill -f "[b]rcm_patchram" 2>/dev/null
+		sleep 2
+		start_patchram
+		if wait_hci0 40; then
+			echo "hci0: up on retry"
+		else
+			echo "hci0: FAILED -- check /dev/ttyS0 and $FW" >&2
+			exit 1
+		fi
+	fi
+fi
+
+# Stopping/starting bluetoothd can leave hci0 DOWN
+sudo hciconfig hci0 up 2>/dev/null
+systemctl is-active --quiet bluetooth || sudo systemctl start bluetooth
+sleep 2
+if ! bluetoothctl list 2>/dev/null | grep -q Controller; then
+	echo "adapter: re-registering"
+	sudo systemctl restart bluetooth
+	sleep 5
+	sudo hciconfig hci0 up 2>/dev/null
+fi
+
+# --- 2. find the bonded device (the address changes with every pairing) ---
+# WARNING: do not use a glob: /var/lib/bluetooth is readable only by root, and `*` is expanded by
+# the calling shell, so even with sudo it does not match and silently finds nothing
+ADDR=$(sudo grep -rl --include=info "^Name=$NAME\$" /var/lib/bluetooth/ 2>/dev/null |
+	head -1 | xargs -r dirname | xargs -r basename)
+if [ -z "$ADDR" ]; then
+	echo "no bonded device named '$NAME'." >&2
+	echo "put it in pairing mode and run:  bluetoothctl --agent NoInputNoOutput" >&2
+	exit 1
+fi
+echo "device: $NAME ($ADDR)"
+
+# --- 3. connect. The device can only be caught while it is advertising, so try a few times ---
+for t in 1 2 3; do
+	if bluetoothctl info "$ADDR" 2>/dev/null | grep -q "Connected: yes"; then
+		echo "connected."
+		exit 0
+	fi
+	echo "connect attempt $t (move the mouse to wake it)"
+	timeout 25 bluetoothctl connect "$ADDR" >/dev/null 2>&1
+	sleep 3
+done
+
+if bluetoothctl info "$ADDR" 2>/dev/null | grep -q "Connected: yes"; then
+	echo "connected."
+else
+	echo "not connected -- wake the mouse and run again." >&2
+	exit 1
+fi

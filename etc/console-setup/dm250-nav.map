@@ -1,0 +1,32 @@
+# DM250: turn the menu/help key into an AltGr modifier and add keys that have no physical key
+# as combinations.
+#
+# Background:
+#   tc3589x-keypad can only emit keycodes for the 80 physical keys;
+#   KEY_HOME(102) / KEY_END(107) / KEY_PAGEUP(104) / KEY_PAGEDOWN(109) /
+#   KEY_F11(87) / KEY_F12(88) do not exist in the matrix at all.
+#   They cannot be added as standalone keys, so define them as combinations at the keysym layer.
+#
+#   menu/help(keycode 125) was by default the same `Alt` as the physical Alt(56),
+#   a complete duplicate. Reassign it to AltGr to create a dedicated layer.
+#   The physical Alt stays Meta (Alt+key in helix / readline keeps working).
+#
+#   Note that once menu/help becomes AltGr, VT switching with menu/help+F2
+#   (Console_2 on the alt layer) no longer fires. VT switching is done with the physical Alt+F2 only.
+#
+# dumpkeys shows Home as Find and End as Select, but these are
+# aliases for Linux console keysyms, and the byte sequences sent are the same.
+
+keymaps 0-127
+
+keycode 125 = AltGr
+
+# Cursor movement: menu/help + arrow keys
+altgr keycode 105 = Home        # menu/help + Left    ESC [ 1 ~
+altgr keycode 106 = End         # menu/help + Right   ESC [ 4 ~
+altgr keycode 103 = Prior       # menu/help + Up      ESC [ 5 ~  (PageUp)
+altgr keycode 108 = Next        # menu/help + Down    ESC [ 6 ~  (PageDown)
+
+# Function keys with no physical key: menu/help + F1/F2
+altgr keycode  59 = F11         # menu/help + F1   ESC [ 2 3 ~
+altgr keycode  60 = F12         # menu/help + F2   ESC [ 2 4 ~

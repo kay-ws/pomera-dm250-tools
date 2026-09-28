@@ -1,0 +1,224 @@
+#!/usr/bin/python3
+"""usb_probe --- capture USB host and charging state in one shot (for isolating PD hub issues)
+
+  sudo usb_probe              show the current state and append one line to /home/pomera/usb_probe.log
+  sudo usb_probe mark LABEL   record a mark in /tmp/usb_probe.mark (separates trials; events starts from here)
+  sudo usb_probe events       show only kernel events since the last mark
+  sudo usb_probe watch N M    record one line every N seconds, M times (to check stability)
+
+Judge by three things: "enumerated devices", "status and the sign of the current", and "event order".
+vbus_status and dwc_otg_conn_en do not reflect reality, so they are shown for reference only.
+"""
+import fcntl, os, subprocess, sys, time
+
+I2C_DEV, RK818_ADDR, I2C_SLAVE_FORCE = "/dev/i2c-0", 0x1C, 0x0706
+DCDC_EN_REG, OTG_EN = 0x23, 0x80
+OTG = "/sys/bus/platform/drivers/usb20_otg"
+PS = "/sys/class/power_supply"
+LOG = "/home/pomera/usb_probe.log"
+MARKFILE = "/tmp/usb_probe.mark"
+EVENT_RE = "charger_detect|Disconnect cb|suspend, HPRT|resume, HPRT|speed USB device|New USB device found|input:|hid-generic|usb-storage|USB disconnect"
+
+
+def rd(path, default="-"):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def vbus_bit():
+    try:
+        fd = os.open(I2C_DEV, os.O_RDWR)
+    except OSError:
+        return None, None
+    try:
+        fcntl.ioctl(fd, I2C_SLAVE_FORCE, RK818_ADDR)
+        os.write(fd, bytes([DCDC_EN_REG]))
+        v = os.read(fd, 1)[0]
+        return bool(v & OTG_EN), v
+    finally:
+        os.close(fd)
+
+
+def devices():
+    base = "/sys/bus/usb/devices"
+    out = []
+    for name in sorted(os.listdir(base)):
+        if "-" not in name or ":" in name:
+            continue
+        vid = rd(os.path.join(base, name, "idVendor"), "")
+        if not vid:
+            continue
+        pid = rd(os.path.join(base, name, "idProduct"), "")
+        prod = rd(os.path.join(base, name, "product"), "(no name)")
+        out.append((name, vid + ":" + pid, prod))
+    return out
+
+
+def liveness():
+    """Check that enumerated devices really respond, by opening their /dev nodes.
+
+    WARNING: when power disappears, the kernel may miss the disconnect and leave stale entries in sysfs
+    (measured 2026-09-24: when the hub was unplugged in AC mode, ndev stayed at 4 while /dev was dead).
+    Counting alone picks up ghosts, so also check whether the nodes can be opened.
+    """
+    nodes = []
+    for n in sorted(os.listdir("/dev/input")):
+        if n.startswith("event"):
+            nodes.append("/dev/input/" + n)
+    for n in sorted(os.listdir("/dev")):
+        if len(n) == 4 and n.startswith("sd"):
+            nodes.append("/dev/" + n)
+    alive, dead = [], []
+    for path in nodes:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            os.close(fd)
+            alive.append(path)
+        except OSError:
+            dead.append(path)
+    return alive, dead
+
+
+def inputs():
+    """Input devices other than the built-in keypad"""
+    out, name = [], None
+    for line in rd("/proc/bus/input/devices", "").splitlines():
+        if line.startswith("N: Name="):
+            name = line.split("=", 1)[1].strip().strip(chr(34))
+        elif line.startswith("H: Handlers=") and name:
+            if "keypad" not in name:
+                out.append(name + " [" + line.split("=", 1)[1].strip() + "]")
+            name = None
+    return out
+
+
+def power():
+    cur = rd(PS + "/battery/current_now", "0")
+    try:
+        ma = int(cur) // 1000
+    except ValueError:
+        ma = 0
+    return {
+        "status": rd(PS + "/battery/status"),
+        "cap": rd(PS + "/battery/capacity"),
+        "ma": ma,
+        "ac": rd(PS + "/ac/online"),
+        "usb": rd(PS + "/usb/online"),
+    }
+
+
+def logline(p, devs):
+    line = "%s ndev=%d %s %s%dmA cap=%s ac=%s vbus=%s conn_en=%s" % (
+        time.strftime("%Y-%m-%dT%H:%M:%S"), len(devs), p["status"],
+        "+" if p["ma"] > 0 else "", p["ma"], p["cap"], p["ac"],
+        "ON" if vbus_bit()[0] else "OFF", rd(OTG + "/dwc_otg_conn_en"))
+    try:
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+    return line
+
+
+def snap():
+    on, raw = vbus_bit()
+    p, devs = power(), devices()
+    print("  Time     : %s" % time.strftime("%H:%M:%S"))
+    print("  Charge   : %s  %s%dmA  capacity %s%%  (ac=%s usb=%s)" % (
+        p["status"], "+" if p["ma"] > 0 else "", p["ma"], p["cap"], p["ac"], p["usb"]))
+    print("  VBUS     : %s%s   NOTE: the device's own boost. OFF is normal when the hub supplies power" % (
+        "ON" if on else "OFF", "" if raw is None else " (0x23=0x%02x)" % raw))
+    print("  Ref      : force_usb_mode=%s op_state=%s conn_en=%s vbus_status=%s <- do not reflect reality" % (
+        rd(OTG + "/force_usb_mode"), rd(OTG + "/op_state"),
+        rd(OTG + "/dwc_otg_conn_en"), rd(OTG + "/vbus_status")))
+    if devs:
+        for path, ids, prod in devs:
+            print("  Devices  : %-8s %s  %s" % (path, ids, prod))
+    else:
+        print("  Devices  : none")
+    for i in inputs():
+        print("  Input    : %s" % i)
+    alive, dead = liveness()
+    if dead:
+        print("  WARNING  : ghost -- %s not responding (open failed)" % " ".join(dead))
+        print("             = stale entries remain in sysfs. Most likely actually disconnected")
+    if devs and p["ac"] == "0" and p["usb"] == "0":
+        print("  CAUTION  : devices visible with no power input (ac=0 usb=0) = suspected ghosts")
+    print("  ---")
+    print("  " + logline(p, devs))
+
+
+def mark(label):
+    """Do not write the mark to /dev/kmsg (it would appear on the device screen even with console_loglevel=1).
+
+    Record the uptime instead; events extracts dmesg from that time onward.
+    """
+    up = float(open("/proc/uptime").read().split()[0])
+    with open(MARKFILE, "w") as f:
+        f.write("%f %s %s\n" % (up, label, time.strftime("%H:%M:%S")))
+    print("  mark: %s (uptime %.1fs)" % (label, up))
+    p, devs = power(), devices()
+    print("  " + logline(p, devs))
+
+
+def events():
+    try:
+        raw = open(MARKFILE).read().split(None, 2)
+        since, label, hhmm = float(raw[0]), raw[1], raw[2].strip()
+        print("  mark: %s, since %s" % (label, hhmm))
+    except (OSError, ValueError, IndexError):
+        since, label = 0.0, None
+        print("  no mark; showing the last 40 lines", file=sys.stderr)
+    dm = subprocess.run(["dmesg"], capture_output=True, text=True).stdout.splitlines()
+    out = []
+    for line in dm:
+        if not line.startswith("["):
+            continue
+        try:
+            ts = float(line[1:line.index("]")])
+        except ValueError:
+            continue
+        if ts >= since:
+            out.append(line)
+    if label is None:
+        out = out[-40:]
+    hit = subprocess.run(["grep", "-E", EVENT_RE], input=chr(10).join(out),
+                         capture_output=True, text=True).stdout
+    for line in hit.splitlines():
+        print("  " + line)
+    if not hit.strip():
+        print("  (no events = nothing happened on the kernel side)")
+
+
+def watch(n, m):
+    for i in range(m):
+        p, devs = power(), devices()
+        print("  " + logline(p, devs))
+        if i + 1 < m:
+            time.sleep(n)
+
+
+def main():
+    a = sys.argv[1:]
+    if os.geteuid() != 0:
+        print("root required: sudo usb_probe %s" % " ".join(a), file=sys.stderr)
+        return 1
+    if not a:
+        snap()
+    elif a[0] == "mark":
+        mark(a[1] if len(a) > 1 else "run")
+    elif a[0] == "events":
+        events()
+    elif a[0] == "watch":
+        watch(int(a[1]) if len(a) > 1 else 10, int(a[2]) if len(a) > 2 else 6)
+    else:
+        print(__doc__, file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

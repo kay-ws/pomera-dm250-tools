@@ -1,0 +1,10 @@
+[Unit]
+Description=Set panel backlight to the preferred default
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/bin/backlight 100
+
+[Install]
+WantedBy=multi-user.target

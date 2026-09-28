@@ -1,0 +1,9 @@
+[Unit]
+Description=DM250 battery logger
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/battlog.sh
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=multi-user.target

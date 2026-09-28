@@ -1,0 +1,130 @@
+#!/bin/bash
+# 2026-09-19: run the UART at 1.5Mbps (--baudrate 1500000). At the default 115200bps, transmit tops out around 92kbps,
+#   and A2DP audio drops out and is full of noise. 3Mbps does not work because the chip cannot match the rate (1.5Mbps seems to be this unit's limit).
+# bt-speaker -- wake the BT chip, connect to a bonded A2DP speaker, and make it the default output.
+#
+# Usage: bt-speaker [device name]    (default: $BT_SPEAKER)
+#
+# Why a script is needed (details: https://zenn.dev/kay1974/articles/aa3143bed8f17d):
+#  1. bt_switch on only powers the chip; hci0 does not appear. A separate firmware upload is needed (same as bt-mouse)
+#  2. mgmt 1.3 lacks LOAD_CONN_PARAM, so it cannot reconnect automatically -> issue connect explicitly
+#  3. Even after connecting, the default output stays auto_null -> make bluez_sink the default and move audio already playing
+# First-time pairing is outside this script's scope (pairable on -> pair without stopping scan).
+#  4. On every connect PulseAudio picks the highest-quality sbc_xq_512, but on the DM250 (WiFi and BT
+#     share one chip and one antenna) transmit cannot keep up and audio drops out -> select a lighter codec again
+#     (measured 2026-09-19: xq_512=dropouts / sbc=no dropouts but distorted / xq_453=no dropouts)
+set -u
+
+FW=/opt/etc/firmware/BCM43438A1.hcd
+PATCHRAM=/opt/bin/brcm_patchram_plus
+NAME=${1:-${BT_SPEAKER:-}}   # device name: argument, or BT_SPEAKER in the environment
+if [ -z "$NAME" ]; then
+	echo "usage: bt-speaker DEVICE_NAME   (or set BT_SPEAKER in the environment)" >&2
+	echo "bonded devices:" >&2
+	sudo grep -rh --include=info "^Name=" /var/lib/bluetooth/ 2>/dev/null | cut -d= -f2- | sort -u | sed "s/^/  /" >&2
+	exit 2
+fi
+CODEC=${BT_SPEAKER_CODEC:-sbc}   # for better quality use BT_SPEAKER_CODEC=sbc_xq_453 (slightly more dropouts)
+# measured 2026-09-19 (UART 1.5Mbps, piano 30s x2): sbc=2 silent gaps / sbc_xq_453=good quality but 4 silent gaps -> sbc as default
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+
+have_hci0() { [ -d /sys/class/bluetooth/hci0 ]; }
+
+wait_hci0() {  # $1 = seconds to wait
+	local i
+	for ((i = 0; i < $1; i += 2)); do
+		sleep 2
+		have_hci0 && return 0
+	done
+	return 1
+}
+
+start_patchram() {
+	sudo sh -c "setsid $PATCHRAM --patchram $FW --baudrate 1500000 --enable_hci --no2bytes \
+		--tosleep 1000 /dev/ttyS0 >/dev/null 2>&1 &"
+}
+
+# --- 1. bring up hci0 (same as bt-mouse) ---
+if have_hci0; then
+	echo "hci0: already up"
+else
+	echo "hci0: powering on... (2-3 min)"
+	sudo /opt/bin/bt_switch off >/dev/null 2>&1
+	sleep 5
+	sudo /opt/bin/bt_switch on >/dev/null || exit 1
+	if wait_hci0 70; then
+		echo "hci0: up on first try"
+	else
+		echo "hci0: first try timed out, retrying patchram"
+		sudo pkill -f "[b]rcm_patchram" 2>/dev/null
+		sleep 2
+		start_patchram
+		if wait_hci0 40; then
+			echo "hci0: up on retry"
+		else
+			echo "hci0: FAILED -- check /dev/ttyS0 and $FW" >&2
+			exit 1
+		fi
+	fi
+fi
+
+sudo hciconfig hci0 up 2>/dev/null
+systemctl is-active --quiet bluetooth || sudo systemctl start bluetooth
+sleep 2
+if ! bluetoothctl list 2>/dev/null | grep -q Controller; then
+	echo "adapter: re-registering"
+	sudo systemctl restart bluetooth
+	sleep 5
+	sudo hciconfig hci0 up 2>/dev/null
+fi
+
+# --- 2. find the bonded device by name ---
+# WARNING: do not use a glob: /var/lib/bluetooth is readable only by root, so the calling shell cannot expand it
+ADDR=$(sudo grep -rl --include=info "^Name=$NAME\$" /var/lib/bluetooth/ 2>/dev/null |
+	head -1 | xargs -r dirname | xargs -r basename)
+if [ -z "$ADDR" ]; then
+	echo "no bonded device named '$NAME'." >&2
+	echo "first-time pairing: bluetoothctl pairable on, then scan + pair (see README)" >&2
+	exit 1
+fi
+echo "device: $NAME ($ADDR)"
+SINK="bluez_sink.${ADDR//:/_}.a2dp_sink"
+
+# --- 3. connect (the speaker must be powered on) ---
+for t in 1 2 3; do
+	bluetoothctl info "$ADDR" 2>/dev/null | grep -q "Connected: yes" && break
+	echo "connect attempt $t (is the speaker powered on?)"
+	timeout 25 bluetoothctl connect "$ADDR" >/dev/null 2>&1
+	sleep 3
+done
+if ! bluetoothctl info "$ADDR" 2>/dev/null | grep -q "Connected: yes"; then
+	echo "not connected -- power on the speaker and run again." >&2
+	exit 1
+fi
+echo "connected."
+
+# --- 4. wait for the PulseAudio sink to appear, then make it the default output ---
+for i in 1 2 3 4 5 6 7 8 9 10; do
+	pactl list short sinks 2>/dev/null | grep -q "$SINK" && break
+	sleep 1
+done
+if ! pactl list short sinks 2>/dev/null | grep -q "$SINK"; then
+	echo "sink $SINK did not appear (profile may not be a2dp_sink)" >&2
+	exit 1
+fi
+CARD="bluez_card.${ADDR//:/_}"
+if [ "$(pactl send-message /card/$CARD/bluez get-codec 2>/dev/null | tr -d '"')" != "$CODEC" ]; then
+	pactl send-message /card/$CARD/bluez switch-codec "\"$CODEC\"" >/dev/null 2>&1
+	for i in 1 2 3 4 5 6 7 8 9 10; do   # switching recreates the sink, so wait for it to come back
+		sleep 1
+		pactl list short sinks 2>/dev/null | grep -q "$SINK" && break
+	done
+fi
+echo "codec: $(pactl send-message /card/$CARD/bluez get-codec 2>/dev/null | tr -d '"')"
+pactl set-default-sink "$SINK" 2>/dev/null
+# also move audio that is already playing to the speaker
+for id in $(pactl list short sink-inputs 2>/dev/null | awk '{print $1}'); do
+	pactl move-sink-input "$id" "$SINK" 2>/dev/null
+done
+vol=$(pactl list sinks 2>/dev/null | grep -A10 "Name: $SINK" | grep -m1 -o '[0-9]*%' | head -1)
+echo "default sink: $SINK (volume ${vol:-?})"

@@ -1,0 +1,28 @@
+#!/bin/sh
+# bl -- show / change the backlight brightness.
+#
+# weston's alt+F9 / alt+F10 only work with the DRM backend. The fbdev backend does not set
+# output->set_backlight, so backlight_binding silently returns
+# (no error or warning is shown, so it just looks like "the keys do nothing"). Write to sysfs directly.
+#
+#   bl        show the current value
+#   bl 150    set an absolute value
+#   bl +20    brighter (relative)
+#   bl -20    darker (relative)
+set -u
+
+BL=/sys/class/backlight/rk28_bl
+MAX=$(cat "$BL/max_brightness")
+CUR=$(cat "$BL/brightness")
+
+case "${1:-}" in
+	"")     echo "$CUR / $MAX"; exit 0 ;;
+	+*|-*)  NEW=$((CUR $1)) ;;
+	*[!0-9]*) echo "usage: bl [N | +N | -N]" >&2; exit 1 ;;
+	*)      NEW=$1 ;;
+esac
+
+[ "$NEW" -lt 1 ] && NEW=1
+[ "$NEW" -gt "$MAX" ] && NEW=$MAX
+sudo sh -c "echo $NEW > $BL/brightness"
+echo "$CUR -> $NEW / $MAX"

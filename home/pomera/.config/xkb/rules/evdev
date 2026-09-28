@@ -1,0 +1,5 @@
+// Pull in the stock evdev rules, then add one custom option.
+! include %S/evdev
+
+! option = symbols
+  custom:dm250nav = +dm250(nav)

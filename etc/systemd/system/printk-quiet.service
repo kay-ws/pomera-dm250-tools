@@ -1,0 +1,14 @@
+[Unit]
+Description=Re-apply kernel.printk after boot
+# systemd-sysctl applies it during sysinit, but afterwards console_loglevel is back at 7
+# (measured 2026-08-23). Apply it once more when boot completes.
+# Putting multi-user.target in After creates a cycle with WantedBy, so use user-sessions instead.
+After=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/sysctl -p /etc/sysctl.d/20-quiet-console.conf
+
+[Install]
+WantedBy=multi-user.target

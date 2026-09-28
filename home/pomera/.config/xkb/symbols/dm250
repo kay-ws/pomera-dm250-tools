@@ -1,0 +1,25 @@
+// DM250 navigation layer.
+//
+// This keyboard has exactly 80 physical keys and no Home/End/PageUp/PageDown/
+// F11/F12 among them.  The one redundant key is menu/help (evdev 125), which
+// by default acts as another Alt -- identical to the physical Alt key.  Turn
+// it into a dedicated Level3 (AltGr) modifier and hang the missing keys off it.
+//
+// Level3 rather than Alt on purpose: putting these on Alt would make the
+// physical Alt fire them too, costing Alt+arrow (Meta) in readline/helix.
+//
+// Mirrors /etc/console-setup/dm250-nav.map, which does the same thing on the
+// kernel keymap side for the bare console and fbterm.
+
+partial modifier_keys function_keys
+xkb_symbols "nav" {
+    key <LWIN> { [ ISO_Level3_Shift ] };
+    modifier_map Mod5 { <LWIN> };
+
+    key <LEFT> { type[Group1] = "FOUR_LEVEL", [ Left,  Left,  Home,  Home  ] };
+    key <RGHT> { type[Group1] = "FOUR_LEVEL", [ Right, Right, End,   End   ] };
+    key <UP>   { type[Group1] = "FOUR_LEVEL", [ Up,    Up,    Prior, Prior ] };
+    key <DOWN> { type[Group1] = "FOUR_LEVEL", [ Down,  Down,  Next,  Next  ] };
+    key <FK01> { type[Group1] = "FOUR_LEVEL", [ F1,    F1,    F11,   F11   ] };
+    key <FK02> { type[Group1] = "FOUR_LEVEL", [ F2,    F2,    F12,   F12   ] };
+};

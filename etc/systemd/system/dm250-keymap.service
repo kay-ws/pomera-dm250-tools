@@ -1,0 +1,13 @@
+[Unit]
+Description=DM250: add Home/End/PageUp/PageDown to the menu/help layer
+Documentation=man:loadkeys(1)
+# Override after keyboard-setup / console-setup have loaded the keymap
+After=keyboard-setup.service console-setup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/loadkeys /etc/console-setup/dm250-nav.map
+
+[Install]
+WantedBy=multi-user.target

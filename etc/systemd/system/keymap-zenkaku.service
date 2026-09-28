@@ -1,0 +1,15 @@
+[Unit]
+Description=Map keycode 41 (zenkaku/hankaku) to NUL for uim-fep
+# Must override after console-setup has loaded the whole keymap
+After=console-setup.service keyboard-setup.service
+Wants=console-setup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# uim-fep looks at the bytes sent to the terminal, not at keysyms. Making keycode 41 send the same NUL(0x00)
+# that Ctrl+Space sends lets it toggle input without touching uim's settings.
+ExecStart=/bin/sh -c "echo \"keycode 41 = nul\" | /usr/bin/loadkeys -"
+
+[Install]
+WantedBy=multi-user.target

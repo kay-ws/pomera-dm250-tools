@@ -1,0 +1,64 @@
+#!/bin/sh
+# Print the DM250 battery status on one line.
+#
+# Remaining time is integrated from a band table of "how many mAh 1% on the fuel gauge represents".
+# The scale is neither evenly spaced nor monotonic (30-39% is the finest, 20-29% is
+# about twice as coarse). A linear "% x full capacity" calculation is off by roughly 20% in the 20-29% range.
+#
+# Source: the full-discharge span of 2026-08-24 to 25 in battlog.tsv (100% -> 0%, 222 samples, 18.42h,
+# integrated as row order x 300 seconds). Total 5,981mAh / 22.81Wh.
+# WARNING: temperature is not shown. The sysfs temp is stuck at 18.8 C in all 559 samples,
+#   and does not move while charging or at the end of a full discharge = the sensor is not returning a value.
+# For testing, BATT_PSDIR replaces the sysfs root (to exercise the discharging path regardless of the real device state)
+PSDIR=${BATT_PSDIR:-/sys/class/power_supply}
+P=$PSDIR/battery
+
+# --short: short form for the herdr sidebar (26 columns by default).
+# The band table exists only in this one place, so the short form is also built on the DM250 side.
+SHORT=0
+[ "$1" = "--short" ] && SHORT=1
+
+[ -r "$P/capacity" ] || { echo "batt: cannot read $P" >&2; exit 1; }
+
+awk -v cap="$(cat $P/capacity)" \
+    -v st="$(cat $P/status)"   \
+    -v uv="$(cat $P/voltage_now)" \
+    -v ua="$(cat $P/current_now)" \
+    -v ac="$(cat $PSDIR/ac/online 2>/dev/null || echo 0)" \
+    -v usb="$(cat $PSDIR/usb/online 2>/dev/null || echo 0)" \
+    -v short="$SHORT" '
+BEGIN {
+  # mAh per 1% for each band. The index is floor(cap/10); awk arrays start at 1, so look up with +1.
+  #        0-9   10-19 20-29 30-39 40-49 50-59 60-69 70-79 80-89 90-99
+  split("44.7  77.8  91.1  48.3  50.6  50.4  59.0  55.6  63.7  56.8", mah, " ")
+
+  V = uv/1e6; I = ua/1e3
+  A = (I<0 ? -I : I)
+  W = A/1000*V
+  ja = (st=="Discharging") ? "discharging" : \
+       (st=="Charging")    ? "charging" : \
+       (st=="Full")        ? "full" : st
+
+  # Sum the charge that flows while the displayed value is c, starting from c=0. 100% is momentary, so cap at 99
+  # (otherwise the result is one step too large when fully charged).
+  top = (cap > 99 ? 99 : cap)
+  rem = 0
+  for (c = 0; c <= top; c++) rem += mah[int(c/10)+1]
+
+  if (short) {
+    printf "%d%%", cap
+    if      (st=="Discharging" && A > 0) printf " %.1fh", rem/A
+    else if (st=="Charging")             printf " +%s", (ac==1 ? "AC" : usb==1 ? "USB" : "")
+    else if (ac==1 || usb==1)            printf " %s",  (ac==1 ? "AC" : "USB")
+    printf "\n"
+    exit
+  }
+
+  printf "%d%%  %s", cap, ja
+  if (st=="Discharging" && A > 0)
+    printf "  about %.1fh left", rem/A
+  if (ac==1 || usb==1)
+    printf "  [%s power]", (ac==1 ? "AC" : "USB")
+  printf "   %.3fV %+.0fmA %.2fW\n", V, I, W
+  if (cap <= 20) printf "!! battery low (%d%%)\n", cap
+}'

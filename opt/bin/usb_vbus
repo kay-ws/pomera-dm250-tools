@@ -1,0 +1,171 @@
+#!/usr/bin/python3
+"""usb_vbus on|off|status --- manual control of USB host power (VBUS 5V)
+
+This kernel has no code path that turns VBUS on. Nothing sends the USB_OTG_POWER_ON
+notification that enables the PMIC(RK818) boost converter; only the receiver exists.
+So the register is written directly over i2c.
+
+Using a device in USB host mode requires both of the following:
+  1. force_usb_mode = 1   (same as usb_host on; done by usb_host.service at boot)
+  2. RK818 0x23 bit7      (OTG_EN; nothing else sets it, so it is done by hand)
+"""
+import fcntl
+import os
+import sys
+import time
+
+I2C_DEV = "/dev/i2c-0"
+RK818_ADDR = 0x1C
+I2C_SLAVE_FORCE = 0x0706
+DCDC_EN_REG = 0x23
+OTG_EN = 0x80
+FORCE_MODE = "/sys/bus/platform/drivers/usb20_otg/force_usb_mode"
+CURRENT_NOW = "/sys/class/power_supply/battery/current_now"
+
+# Reading back right after a write can return a stale value, so wait before checking
+SETTLE = 1.5
+# Measured time from VBUS on until the device is enumerated: about 2 seconds
+ENUM_WAIT = 3.0
+
+
+def _open():
+    fd = os.open(I2C_DEV, os.O_RDWR)
+    fcntl.ioctl(fd, I2C_SLAVE_FORCE, RK818_ADDR)
+    return fd
+
+
+def reg_read():
+    fd = _open()
+    try:
+        os.write(fd, bytes([DCDC_EN_REG]))
+        return os.read(fd, 1)[0]
+    finally:
+        os.close(fd)
+
+
+def reg_write(value):
+    fd = _open()
+    try:
+        os.write(fd, bytes([DCDC_EN_REG, value]))
+    finally:
+        os.close(fd)
+
+
+def read_file(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def usb_devices():
+    """Return connected devices other than root hubs as (path, VID:PID, product name)"""
+    base = "/sys/bus/usb/devices"
+    found = []
+    for name in sorted(os.listdir(base)):
+        # root hubs are usbN; devices below them contain '-', as in 3-1.4
+        if "-" not in name or ":" in name:
+            continue
+        vid = read_file(os.path.join(base, name, "idVendor"))
+        pid = read_file(os.path.join(base, name, "idProduct"))
+        if not vid:
+            continue
+        product = read_file(os.path.join(base, name, "product")) or "(no name)"
+        found.append((name, "%s:%s" % (vid, pid), product))
+    return found
+
+
+def show_status():
+    value = reg_read()
+    on = bool(value & OTG_EN)
+    print("VBUS     : %-3s (0x23 = 0x%02x)" % ("ON" if on else "OFF", value))
+    print("i2c      : %s addr=0x%02x reg=0x%02x bit%d (I2C_SLAVE_FORCE=0x%04x)"
+          % (I2C_DEV, RK818_ADDR, DCDC_EN_REG, OTG_EN.bit_length() - 1, I2C_SLAVE_FORCE))
+
+    mode = read_file(FORCE_MODE)
+    print("USB mode : %s (force_usb_mode=%s)" % ("host" if mode == "1" else "device", mode))
+
+    current = read_file(CURRENT_NOW)
+    if current is not None:
+        print("Battery  : %dmA" % (int(current) // 1000))
+
+    devices = usb_devices()
+    if devices:
+        for path, ids, product in devices:
+            print("Devices  : %-8s %s  %s" % (path, ids, product))
+    else:
+        print("Devices  : none")
+
+    cards = read_file("/proc/asound/cards")
+    if cards and "no soundcards" not in cards:
+        for line in cards.splitlines():
+            if "]:" in line:
+                print("Sound    : %s" % line.strip())
+
+
+def turn_on():
+    value = reg_read()
+    if value & OTG_EN:
+        print("already ON (0x23 = 0x%02x)" % value)
+        return 0
+
+    # Outside host mode, devices stay invisible even with 5V applied
+    if read_file(FORCE_MODE) != "1":
+        with open(FORCE_MODE, "w") as f:
+            f.write("1")
+        print("set force_usb_mode to 1 (host mode)")
+
+    reg_write(value | OTG_EN)
+    time.sleep(SETTLE)
+    if not reg_read() & OTG_EN:
+        print("failed: bit7 did not get set", file=sys.stderr)
+        return 1
+
+    print("VBUS ON (5V output)")
+    print("WARNING: charging via Type-C is not possible meanwhile. Consumption rises by about +114mA")
+    print("WARNING: do not turn this on with a PD-input hub -- the device stops taking external power,")
+    print("   builds 5V from the battery and feeds it to the hub instead (measured 2026-09-24: +97mA -> -411mA)")
+    time.sleep(ENUM_WAIT - SETTLE)
+    for path, ids, product in usb_devices():
+        print("  found: %-8s %s  %s" % (path, ids, product))
+    return 0
+
+
+def turn_off():
+    value = reg_read()
+    if not value & OTG_EN:
+        print("already OFF (0x23 = 0x%02x)" % value)
+        return 0
+
+    reg_write(value & ~OTG_EN)
+    time.sleep(SETTLE)
+    if reg_read() & OTG_EN:
+        print("failed: bit7 did not clear", file=sys.stderr)
+        return 1
+
+    print("VBUS OFF (connected devices are disconnected)")
+    return 0
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else ""
+
+    if action not in ("on", "off", "status"):
+        print("usage: usb_vbus on|off|status", file=sys.stderr)
+        return 2
+
+    # status also opens /dev/i2c-0, so every action needs root
+    if os.geteuid() != 0:
+        print("root required: sudo usb_vbus %s" % action, file=sys.stderr)
+        return 1
+
+    if action == "status":
+        show_status()
+        return 0
+
+    return turn_on() if action == "on" else turn_off()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
