@@ -4,10 +4,12 @@
 # bt-mouse -- wake the BT chip and connect to a bonded LE mouse.
 #
 # Why a script is needed (details: https://zenn.dev/kay1974/articles/aa3143bed8f17d):
-#  1. /opt/bin/bt_switch on starts patchram 3 seconds after lifting rfkill, but
-#     the BCM43438 does not answer on the UART yet, so it keeps sending HCI_Reset and gives up. Moreover,
-#     bt_switch does not report the failure and prints "bluetooth switch ON".
-#     -> if hci0 does not appear, restart only patchram (the chip is already powered, so it succeeds)
+#  1. /opt/bin/bt_switch on starts patchram 3 seconds after lifting rfkill, but that first patchram
+#     never gets a byte out: the kernel's rk_serial driver leaves the tty software-stopped when CRTSCTS
+#     is switched on (tx stays 0 in /proc/tty/driver/rk_serial), and the chip does not answer HCI_Reset.
+#     Moreover, bt_switch does not report the failure and prints "bluetooth switch ON".
+#     -> if hci0 does not appear within a few seconds, kill patchram and start it again; the second one
+#        succeeds (hci0 in ~8 s). Waiting longer does not help (measured 2026-10-01: sleep 3/10, 110 s, 0/6).
 #  2. mgmt 1.3 lacks LOAD_CONN_PARAM, so the kernel's auto-connect cannot be used.
 #     -> even for bonded devices, connect explicitly from user space
 set -u
@@ -47,8 +49,8 @@ else
 	sleep 5
 	sudo /opt/bin/bt_switch on >/dev/null || exit 1
 
-	# first try. The firmware upload takes nearly 50 seconds, so wait without interrupting it
-	if wait_hci0 70; then
+	# first try. It never succeeds on its own (see 1. above), so give it only a few seconds
+	if wait_hci0 6; then
 		echo "hci0: up on first try"
 	else
 		echo "hci0: first try timed out, retrying patchram"

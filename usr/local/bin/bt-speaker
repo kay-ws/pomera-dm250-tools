@@ -6,7 +6,8 @@
 # Usage: bt-speaker [device name]    (default: $BT_SPEAKER)
 #
 # Why a script is needed (details: https://zenn.dev/kay1974/articles/aa3143bed8f17d):
-#  1. bt_switch on only powers the chip; hci0 does not appear. A separate firmware upload is needed (same as bt-mouse)
+#  1. bt_switch on only powers the chip; hci0 does not appear: the first patchram it starts never gets a
+#     byte out, so patchram is restarted after a few seconds instead of waiting (same as bt-mouse)
 #  2. mgmt 1.3 lacks LOAD_CONN_PARAM, so it cannot reconnect automatically -> issue connect explicitly
 #  3. Even after connecting, the default output stays auto_null -> make bluez_sink the default and move audio already playing
 # First-time pairing is outside this script's scope (pairable on -> pair without stopping scan).
@@ -48,11 +49,11 @@ start_patchram() {
 if have_hci0; then
 	echo "hci0: already up"
 else
-	echo "hci0: powering on... (2-3 min)"
+	echo "hci0: powering on... (about 30 s)"
 	sudo /opt/bin/bt_switch off >/dev/null 2>&1
 	sleep 5
 	sudo /opt/bin/bt_switch on >/dev/null || exit 1
-	if wait_hci0 70; then
+	if wait_hci0 6; then
 		echo "hci0: up on first try"
 	else
 		echo "hci0: first try timed out, retrying patchram"
