@@ -7,7 +7,8 @@
 #
 # Why a script is needed (details: https://zenn.dev/kay1974/articles/aa3143bed8f17d):
 #  1. bt_switch on only powers the chip; hci0 does not appear: the first patchram it starts never gets a
-#     byte out, so patchram is restarted after a few seconds instead of waiting (same as bt-mouse)
+#     byte out (CTS is still low at the first open after power-on; see bt-mouse), so the port is primed
+#     during bt_switch's wait, with patchram restarted as a fallback (same as bt-mouse)
 #  2. mgmt 1.3 lacks LOAD_CONN_PARAM, so it cannot reconnect automatically -> issue connect explicitly
 #  3. Even after connecting, the default output stays auto_null -> make bluez_sink the default and move audio already playing
 # First-time pairing is outside this script's scope (pairable on -> pair without stopping scan).
@@ -45,15 +46,30 @@ start_patchram() {
 		--tosleep 1000 /dev/ttyS0 >/dev/null 2>&1 &"
 }
 
+# Open the UART briefly so that CTS (low at the very first open after power-on, high ~20 ms later) is
+# already high when patchram opens it. It has to be a real open that lasts a moment: stty is too short.
+prime_uart() {
+	sudo python3 -c "import os, time
+fd = os.open('/dev/ttyS0', os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)
+time.sleep(0.2)
+os.close(fd)" 2>/dev/null || true
+}
+
 # --- 1. bring up hci0 (same as bt-mouse) ---
 if have_hci0; then
 	echo "hci0: already up"
 else
-	echo "hci0: powering on... (about 30 s)"
+	echo "hci0: powering on... (about 10 s)"
 	sudo /opt/bin/bt_switch off >/dev/null 2>&1
 	sleep 5
-	sudo /opt/bin/bt_switch on >/dev/null || exit 1
-	if wait_hci0 6; then
+	# bt_switch on sleeps 3 s and then starts patchram; that first open of the UART is the one that dies
+	# (see 1. above). Prime the port during the wait so CTS is already high by then.
+	sudo /opt/bin/bt_switch on >/dev/null 2>&1 </dev/null &   # detached (see bt-mouse)
+	switch_pid=$!
+	sleep 1.2
+	prime_uart
+	wait "$switch_pid" || exit 1
+	if wait_hci0 30; then
 		echo "hci0: up on first try"
 	else
 		echo "hci0: first try timed out, retrying patchram"
