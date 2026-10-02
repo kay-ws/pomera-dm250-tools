@@ -46,8 +46,9 @@ start_patchram() {
 		--tosleep 1000 /dev/ttyS0 >/dev/null 2>&1 &"
 }
 
-# Open the UART briefly so that CTS (low at the very first open after power-on, high ~20 ms later) is
-# already high when patchram opens it. It has to be a real open that lasts a moment: stty is too short.
+# Open the UART briefly so that CTS is already high when patchram opens it (CTS rises only after the
+# host raises RTS by opening the port, and stays high after close; see bt-mouse).
+# It has to be a real open that lasts a moment: stty is too short.
 prime_uart() {
 	sudo python3 -c "import os, time
 fd = os.open('/dev/ttyS0', os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)

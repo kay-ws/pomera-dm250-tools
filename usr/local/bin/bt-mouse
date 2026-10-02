@@ -5,10 +5,14 @@
 #
 # Why a script is needed (details: https://zenn.dev/kay1974/articles/aa3143bed8f17d):
 #  1. /opt/bin/bt_switch on starts patchram 3 seconds after lifting rfkill, but that first patchram
-#     never gets a byte out. The first open of /dev/ttyS0 after power-on sees CTS low (it rises ~20 ms
-#     later), so the kernel stops TX (tty->hw_stopped), and the rk_serial driver never notices CTS rising
-#     (tx stays 0 in /proc/tty/driver/rk_serial). Moreover, bt_switch does not report the failure and
-#     prints "bluetooth switch ON". Waiting does not help (measured 2026-10-01: sleep 3/10, 110 s, 0/6).
+#     never gets a byte out. CTS does not rise by itself after power-on: it rises 4-10 ms after the host
+#     raises RTS by opening /dev/ttyS0, and it stays high after the port is closed (measured 2026-10-02).
+#     patchram turns on CRTSCTS right after that first open, while CTS is still low, so serial_core stops
+#     TX (tty->hw_stopped). rk_serial never reports the later rise (its CTS handling is under #if 0 in the
+#     public Rockchip release-3.10 source), so TX stays stopped: the tx counter of ttyS0 in
+#     /proc/tty/driver/rk_serial does not advance. Moreover, bt_switch does not report the failure and
+#     prints "bluetooth switch ON". Waiting does not help (measured 2026-10-01: sleep 3/10, 110 s, 0/6;
+#     2026-10-02: sleep 0.2 in place of the open, 0/6).
 #     -> open the port once ourselves during bt_switch's 3 s wait, so CTS is already high when patchram
 #        opens it (hci0 in ~9 s). If hci0 still does not appear, kill patchram and start it again
 #        (the second open succeeds, hci0 in ~8 s).
@@ -42,8 +46,9 @@ start_patchram() {
 		--tosleep 1000 /dev/ttyS0 >/dev/null 2>&1 &"
 }
 
-# Open the UART briefly so that CTS (low at the very first open after power-on, high ~20 ms later) is
-# already high when patchram opens it. It has to be a real open that lasts a moment: stty is too short.
+# Open the UART briefly so that CTS is already high when patchram opens it (CTS rises only after the
+# host raises RTS by opening the port, and stays high after close; see 1. above).
+# It has to be a real open that lasts a moment: stty is too short.
 prime_uart() {
 	sudo python3 -c "import os, time
 fd = os.open('/dev/ttyS0', os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)
