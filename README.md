@@ -1,86 +1,81 @@
 # pomera-dm250-tools
 
-Small scripts, systemd units and keymaps for using the Pomera DM250 as a Linux terminal (Debian, kernel 3.10).
+Small scripts, systemd units and key settings for using the Pomera DM250 as a Linux terminal (Debian 13, kernel 6.18).
 
-ポメラ DM250 を Linux 端末として使うために作った、小さなスクリプト・systemd の unit・キーマップの置き場です。電池の表示、Bluetooth のマウスとスピーカー、USB ホストの給電、起動の高速化、キー配列の追加などが入っています。
+ポメラ DM250 を Linux 端末として使うために作った、小さなスクリプト・systemd の unit・キー設定の置き場です。電池の表示と記録、バックライト、Bluetooth のスピーカーとマウス、USB ホストの給電、キーの追加が入っています。
 
-Linux 化そのものは [ichinomoto さんの配布物](https://www.ekesete.net/log/?p=9504)を使わせてもらっています。ここにあるのは、その上で使うための道具です。
+Linux 化そのものは [ichinomoto さんの SD イメージ](https://www.ekesete.net/log/?p=9565)（kernel 6.18 + Debian 13 trixie）を使わせてもらっています。ここにあるのは、その上で使うための道具です。
+
+このブランチ（`kernel-6.18`）は、kernel 6.18 のイメージ向けです。kernel 3.10 のキット（`pomera_dm2x0_debian_20220816`）向けの説明は、`main` ブランチの README にあります。
 
 ## 動作を確認した環境
 
 - ポメラ DM250
-- ichinomoto さんの rootfs（`pomera_dm2x0_debian_20220816`）を Debian 12 bookworm に上げたもの
-- カーネル 3.10.0
+- ichinomoto さんの SD イメージ 20261002 版（kernel 6.18.41、Debian 13 trixie）
+- sway + foot
 
-DM200 では試していません。`usb_vbus` のように、DM250 の電源チップ（RK818）を前提にしたものもあります。
+DM200 と DM250US では試していません。`usb_vbus` のように、DM250 の電源チップ（RK818）を前提にしたものもあります。
 
 ## 中身
 
-置き場所は、DM250 の上でのパスと同じにしてあります。
+置き場所は、DM250 の上でのパスと同じにしてあります。`usb_vbus` だけは例外で、kernel 6.18 のイメージには `/opt/bin` が無いので `/usr/local/bin` に置きます。
 
 ### コマンド
 
-| パス | 役割 | 使うもの |
+| パス | 役割 | 6.18 での確認 |
 |---|---|---|
-| `home/pomera/.local/bin/batt` | 電池の残量・状態・電流と、残り時間の見込みを1行で出す | なし |
-| `usr/local/bin/bl` | バックライトの明るさを見る・変える | なし |
-| `usr/local/bin/bt-mouse` | Bluetooth を立ち上げて、ペアリング済みの LE マウスに繋ぐ | キットの `bt_switch`・`brcm_patchram_plus` |
-| `usr/local/bin/bt-speaker` | Bluetooth を立ち上げて、ペアリング済みのスピーカーに繋ぎ、既定の出力にする | 同上、PulseAudio |
-| `opt/bin/usb_vbus` | USB ホストの 5V（VBUS）を入れる・切る | キットの `usb_host` |
-| `opt/bin/usb_probe` | USB と充電の状態をまとめて表示・記録する（切り分け用） | なし |
-| `usr/local/bin/battlog.sh` | 電池の状態を5分ごとに記録する | なし |
+| `home/pomera/.local/bin/batt` | 電池の残量・状態・電流と、残り時間の見込みを1行で出す | 動作を確認。残り時間の精度は未検証 |
+| `usr/local/bin/bl` | バックライトの明るさを見る・変える | 動作を確認 |
+| `usr/local/bin/battlog.sh` | 電池の状態を5分ごとに記録する | 動作を確認 |
+| `usr/local/bin/bt-speaker` | ペアリング済みのスピーカーに繋ぎ、既定の出力にする | 動作を確認（PipeWire） |
+| `usr/local/bin/bt-mouse` | ペアリング済みの LE マウスに繋ぐ | 接続まで。マウスは動かない（下記） |
+| `opt/bin/usb_vbus` | USB ホストの 5V（VBUS）を入れる・切る | 未検証 |
 
-`usb_vbus` と `usb_probe` を `/opt/bin` に置いているのは、`sudo` で呼ぶためです。キットの `/opt/bin` は、`sudo` の PATH（`secure_path`）に入っています。
+`bl`・`batt`・`battlog.sh`・`usb_vbus` は sysfs のパスを見て、`bt-mouse`・`bt-speaker` は `/opt/bin/bt_switch` の有無を見て、kernel 3.10 と 6.18 を切り替えます。3.10 側の処理は残してありますが、この変更を入れた後の版を 3.10 の実機では動かしていません。
 
-### systemd の unit と設定
+### 設定と unit
 
 | パス | 役割 |
 |---|---|
-| `etc/systemd/system/keychecker.service` | キットの Fn キー処理（`fnkey`）を正しく起動する。キットの SysV スクリプトのままだと、起動の完了が5分遅れる |
-| `etc/systemd/system/keymap-zenkaku.service` | 半角／全角キーで uim-fep の入力を切り替えられるようにする |
-| `etc/systemd/system/dm250-keymap.service` ＋ `etc/console-setup/dm250-nav.map` | `menu/help` キーを AltGr にして、`menu`＋矢印で Home/End/PageUp/PageDown、`menu`＋F1/F2 で F11/F12 を出す（コンソール・fbterm 用） |
-| `home/pomera/.config/xkb/` | 上と同じキー配列の weston 用 |
-| `etc/systemd/system/printk-quiet.service` ＋ `etc/sysctl.d/20-quiet-console.conf` | カーネルのメッセージが画面に割り込まないようにする |
-| `etc/systemd/system/backlight-default.service` | 起動時のバックライトを決める |
+| `etc/keyd/pomera.conf` | イメージ付属の keyd 設定に、`menu`＋矢印で Home/End/PageUp/PageDown、`menu`＋F1/F2 で F11/F12 を出すレイヤを足したもの |
 | `etc/systemd/system/battlog.service` | `battlog.sh` を動かす |
+
+### kernel 3.10 専用のもの
+
+次のファイルは 3.10 のキット用で、6.18 のイメージでは使いません。
+
+| パス | 6.18 で使わない理由 |
+|---|---|
+| `etc/systemd/system/backlight-default.service` | 明るさの保存と復元は systemd-backlight がやる |
+| `etc/systemd/system/keychecker.service` | キットの `fnkey` が無い。キーの処理は keyd |
+| `etc/systemd/system/keymap-zenkaku.service` | uim-fep 用 |
+| `etc/systemd/system/dm250-keymap.service` ＋ `etc/console-setup/dm250-nav.map` | 同じ割り当てを `etc/keyd/pomera.conf` でやる |
+| `home/pomera/.config/xkb/` | weston 用 |
+| `etc/systemd/system/printk-quiet.service` ＋ `etc/sysctl.d/20-quiet-console.conf` | イメージの設定のままで、カーネルのメッセージは画面に割り込まない |
+| `opt/bin/usb_probe` | 3.10 の USB ドライバのパスとログを読む |
 
 ## 導入
 
-### コマンド
-
 ```sh
-sudo install -m 755 usr/local/bin/* /usr/local/bin/
-sudo install -m 755 opt/bin/* /opt/bin/
+sudo install -m 755 usr/local/bin/* opt/bin/usb_vbus /usr/local/bin/
 install -D -m 755 home/pomera/.local/bin/batt ~/.local/bin/batt
+
+sudo install -m 644 etc/systemd/system/battlog.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now battlog
 ```
 
-### unit
+### キーの設定
+
+イメージ付属の `/etc/keyd/pomera.conf` を置き換えます。元のファイルを退避してから入れてください。退避先は `/etc/keyd/` の外にします。
 
 ```sh
-sudo install -m 644 etc/systemd/system/*.service /etc/systemd/system/
-sudo install -m 644 etc/console-setup/dm250-nav.map /etc/console-setup/
-sudo install -m 644 etc/sysctl.d/20-quiet-console.conf /etc/sysctl.d/
-sudo systemctl daemon-reload
-sudo systemctl enable keychecker keymap-zenkaku dm250-keymap printk-quiet backlight-default battlog
+sudo cp -p /etc/keyd/pomera.conf /etc/keyd-pomera.conf.orig
+sudo install -m 644 etc/keyd/pomera.conf /etc/keyd/pomera.conf
+sudo keyd.rvaiya reload
 ```
 
-`keychecker.service` を使う場合は、先にキットの SysV スクリプトを外してください。
-
-```sh
-sudo update-rc.d -f keychecker remove
-sudo rm /etc/init.d/keychecker
-sudo systemctl daemon-reload
-```
-
-SysV スクリプトが残っていても、同じ名前の unit のほうが優先されるので、いったんは動きます。ただ、その状態だと `systemctl enable` が `Default-Start contains no runlevels` で失敗し、**再起動したときに Fn キーが効かなくなります**。
-
-### weston のキー配列
-
-`home/pomera/.config/xkb/` を `~/.config/xkb/` に置き、`~/.config/weston.ini` の `[keyboard]` に次の1行を足します。
-
-```ini
-keymap_options=custom:dm250nav
-```
+Debian の keyd は、実行ファイルの名前が `keyd.rvaiya` です。trixie の版（2.5.0）には設定を検査するコマンドが無いので、読み込み直した後に `journalctl -u keyd -n 6` でエラーが出ていないかを見ます。
 
 ## 使い方
 
@@ -88,14 +83,16 @@ keymap_options=custom:dm250nav
 
 ```console
 $ batt
-65%  charging  [USB power]   3.931V +60mA 0.24W
+95%  discharging  about 11.8h left   4.041V -468mA 1.89W
 $ batt --short
-65% +USB
+95% 11.7h
 ```
 
-`--short` は、狭い場所（端末マルチプレクサのステータス欄など）に出すための短い形です。給電が AC 扱いか USB 扱いかを区別して表示します。
+`--short` は、狭い場所（端末マルチプレクサのステータス欄など）に出すための短い形です。給電中は、AC 扱いか USB 扱いかを区別して表示します。
 
-残り時間は、実際に 100% から 0% まで放電したときの記録から、残量 1% あたりの容量を 10% ごとに求めた表で計算しています。残量計の目盛りは等間隔ではないので、単純な比例計算よりずれが小さくなります。
+kernel 6.18 では、残量計が出す `charge_now`（残りの電荷量）を今の電流で割って、残り時間を出します。この値がどれくらい正確かは、まだ確かめていません。
+
+kernel 3.10 には `charge_now` が無いので、実際に 100% から 0% まで放電したときの記録から作った表で計算します。
 
 ### bl
 
@@ -106,36 +103,45 @@ bl +20    # 明るく
 bl -20    # 暗く
 ```
 
-weston の fbdev バックエンドでは `Alt+F9`／`Alt+F10` の明るさ変更が効かないので、sysfs に直接書いています。
+kernel 6.18 のイメージでは、`video` グループのユーザーなら `sudo` なしで変えられます。下限は、イメージ付属の `backlight` コマンドと同じ 41 です。
 
-### bt-mouse / bt-speaker
+イメージ付属の keyd 設定には、「無変換＋F1／F2」で明るさを1ずつ変える割り当てがあります。`bl` は、値を指定したいときや、大きく変えたいときに使います。
+
+### bt-speaker
 
 ```sh
-bt-mouse "マウスの名前"
 bt-speaker "スピーカーの名前"
 ```
 
-ペアリング済みの機器に繋ぐためのコマンドです。いつも同じ機器を使うなら、`~/.profile` などで環境変数に名前を入れておくと、引数を省けます。
+kernel 6.18 では、Bluetooth はカーネルが起動時に立ち上げます。ペアリング済みのスピーカーは、電源を入れるだけで繋がり、既定の出力にもなります。ふだん `bt-speaker` を打つ必要はありません。
+
+使うのは、`bluetooth_power off` で止めた Bluetooth を戻すときや、自動で繋がらなかったときです。Bluetooth を戻すときだけ `sudo` を使います。
+
+いつも同じ機器を使うなら、`~/.profile` などで環境変数に名前を入れておくと、引数を省けます。名前を渡さずに実行すると、使い方とペアリング済みの機器の名前を表示して終わります。
 
 ```sh
-export BT_MOUSE="マウスの名前"
 export BT_SPEAKER="スピーカーの名前"
+export BT_MOUSE="マウスの名前"
 ```
 
-名前を渡さずに実行すると、使い方とペアリング済みの機器の名前を表示して終わります。
+コーデックは PipeWire（WirePlumber）が選びます。確認したスピーカーでは SBC でした。`BT_SPEAKER_CODEC` は kernel 3.10（PulseAudio）のときだけ効きます。
 
-カーネル 3.10 の Bluetooth 管理インターフェース（mgmt 1.3）には自動で再接続する仕組みがないので、切れたらもう一度打ちます。`hci0` が無い状態から始めると、電源投入後の準備（UART を一度開く手順）が入るので約10秒かかります。
+### bt-mouse
 
-Bluetooth のファームウェアは、UART を 1.5Mbps にして読み込みます。キットの設定のままの 115200bps だと、送信が約 92kbps で頭打ちになり、スピーカーの音が途切れます。キットの `bt_switch` にも同じ変更を[提案しています](https://github.com/ichinomoto/dm200_tools/pull/5)。
+```sh
+bt-mouse "マウスの名前"
+```
 
-`bt-speaker` のコーデックは、既定で `sbc` です。`BT_SPEAKER_CODEC=sbc_xq_453` にすると音質は上がりますが、途切れがやや増えます。
+**kernel 6.18 のイメージ（20261002 版、20261003 版）では、Bluetooth LE のマウスは動きません。** ペアリングと接続は成功しますが、カーネルに UHID が入っていないので、入力デバイスが作られません。[ichinomoto/dm200_tools#11](https://github.com/ichinomoto/dm200_tools/issues/11) で報告しています。
 
-**LE のマウスを使うには、BlueZ にパッチが必要です。** [pomera-bluez-patches](https://github.com/kay-ws/pomera-bluez-patches) を見てください。
+kernel 3.10 で必要だった BlueZ のパッチ（[pomera-bluez-patches](https://github.com/kay-ws/pomera-bluez-patches)）は、6.18 では要りません。
 
-初回のペアリングは、このコマンドの範囲外です。手順の要点は次のとおりです。
+### 初回のペアリング
 
-1. `bluetoothctl pairable on` を**先に**実行する。これが無いと `Bonded: no` になり、切断するたびに鍵が消えます
-2. `bluetoothctl scan on` を止めないまま、`pair`・`trust`・`connect` まで進める。スキャンが終わると、見つけた機器の情報が消えて `not available` になります
+`bt-speaker` と `bt-mouse` の範囲外です。手順の要点は次のとおりです。
+
+1. `bluetoothctl` を対話で起動し、`agent NoInputNoOutput`、`default-agent`、`pairable on` を先に打つ。`bluetoothctl pair アドレス` を単発で実行すると、エージェントが登録されず `AuthenticationFailed` になることがあります
+2. `scan on` を止めないまま、`pair`・`trust`・`connect` まで進める
 
 ### usb_vbus
 
@@ -145,33 +151,50 @@ sudo usb_vbus off      # 止める
 sudo usb_vbus status   # 状態と、繋がっている機器
 ```
 
-DM250 のカーネルには、USB ホストの 5V を出す経路がありません。電源チップ RK818 のレジスタ（`0x23` の bit7）を i2c で直接書いて、昇圧を入れます。
+電源チップ RK818 のレジスタ（`0x23` の bit7）を i2c で直接書いて、USB ホストの 5V の昇圧を入れます。
+
+**kernel 6.18 では、パスを合わせただけで、`on` と `off` を実機で試していません。**
+
+- PD 入力（充電器を挿す口）付きの USB-C ハブを使うなら、`usb_vbus` は要りません。ハブを挿すだけで機器が認識され、DM250 も充電されました（2回試して2回とも）
+- 出番があるのは、ハブを使わずに機器を直接挿すときです
+- kernel 6.18 では、同じビットをカーネルの rk808 ドライバが `OTG_SWITCH` というレギュレータとして持っています。`usb_vbus` はドライバを通さずに書くので、ドライバがこのレジスタを更新したときに、立てたビットが消えることがあります
+- イメージ付属の `usb_host` は、VBUS を操作しない作りです
 
 **注意**
 
-- 5V を出している間は、Type-C から充電できません
-- 自動では止まりません。使い終わったら `off` にしてください。消し忘れると電池が減り続けます
-- **PD 入力（充電器を挿す口）付きの USB-C ハブを使うときは、`on` にしないでください。** ハブが下流の機器に給電するので不要です。`on` にすると、外からの給電を受けるのをやめて電池からハブへ流す側に回り、機器は同じように動いたまま電池だけが減ります
+- kernel 3.10 では、5V を出している間は Type-C から充電できませんでした。6.18 でどうなるかは確かめていません
+- 自動では止まりません。使い終わったら `off` にしてください
 - 電源チップのレジスタを直接書く道具です。使うのは自己責任でお願いします
-
-PD 入力付きハブで「充電しながら USB 機器を使う」話は、[こちらの記事](https://zenn.dev/kay1974/articles/4f084f3a6a5a0b)に書きました。
-
-### usb_probe
-
-```sh
-sudo usb_probe              # 今の状態を表示し、/home/pomera/usb_probe.log に1行残す
-sudo usb_probe mark LABEL   # 試行の区切りを記録する
-sudo usb_probe events       # 区切り以降のカーネルのイベントだけを出す
-sudo usb_probe watch N M    # N 秒ごとに M 回、1行ずつ記録する
-```
-
-USB の機器の数・充電の状態と電流の向き・カーネルのイベントの順番を、まとめて取るための道具です。`vbus_status` や `dwc_otg_conn_en` は実態を表さないので、参考として出すだけにしています。
 
 ### battlog
 
-`battlog.service` を有効にすると、`/home/pomera/battlog.tsv` に5分ごとに1行ずつ記録します。サスペンドから復帰すると時計がずれることがあるので、あとで集計するときは、時刻の飛びを除いてください。
+`battlog.service` を有効にすると、`/home/pomera/battlog.tsv` に5分ごとに1行ずつ記録します。列は、時刻・状態・残量（%）・電圧・電流・温度・`charge_now` です。kernel 6.18 には温度の値が無いので `-` が入ります。
+
+サスペンドから復帰すると時計がずれることがあるので、あとで集計するときは、時刻の飛びを除いてください。
+
+### キー
+
+`etc/keyd/pomera.conf` を入れると、次の組み合わせが使えます。この機種のキーボードには、どれも単独のキーがありません。
+
+| 押すキー | 出るキー |
+|---|---|
+| `menu`＋← / → | Home / End |
+| `menu`＋↑ / ↓ | PageUp / PageDown |
+| `menu`＋F1 / F2 | F11 / F12 |
+
+`menu` キーは、それ以外のキーと一緒に押すと、これまでどおり Meta（sway の `$mod`）として働きます。
+
+`menu`＋矢印を Home などに使うので、sway の `$mod`＋矢印（フォーカスの移動）は届かなくなります。`$mod`＋`h`／`j`／`k`／`l` を使ってください。
+
+イメージ付属の「無変換＋矢印」の割り当ては、そのまま残してあります。
+
+`menu`＋矢印は実機で確認しました。`menu`＋F1／F2 は、まだ確認していません。
 
 ## 関連する記事
+
+- [DM250 を kernel 6.18 + Debian 13 (trixie) の SD イメージへ移行した作業メモ](https://zenn.dev/kay1974/articles/6457215826fd32)
+
+kernel 3.10 のころの記事です。
 
 - [ポメラDM250をClaude Codeの操作端末にしてみて、踏んだ罠12選](https://zenn.dev/kay1974/articles/b617594c41fb4f)
 - [続・罠10選](https://zenn.dev/kay1974/articles/12aa06307899bc)

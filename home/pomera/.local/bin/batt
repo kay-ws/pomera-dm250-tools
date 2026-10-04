@@ -9,14 +9,21 @@
 # integrated as row order x 300 seconds). Total 5,981mAh / 22.81Wh.
 # WARNING: temperature is not shown. The sysfs temp is stuck at 18.8 C in all 559 samples,
 #   and does not move while charging or at the end of a full discharge = the sensor is not returning a value.
+#
+# Kernel 6.18 (power_supply/BATTERY) exposes charge_now, so the remaining charge is read directly and
+# the band table is not used. The table describes the 3.10 fuel gauge only (power_supply/battery).
 # For testing, BATT_PSDIR replaces the sysfs root (to exercise the discharging path regardless of the real device state)
 PSDIR=${BATT_PSDIR:-/sys/class/power_supply}
-P=$PSDIR/battery
+if [ -e "$PSDIR/BATTERY" ]; then
+	P=$PSDIR/BATTERY; AC=$PSDIR/AC; USB=$PSDIR/USB
+else
+	P=$PSDIR/battery; AC=$PSDIR/ac; USB=$PSDIR/usb
+fi
 
 # --short: short form for the herdr sidebar (26 columns by default).
 # The band table exists only in this one place, so the short form is also built on the DM250 side.
 SHORT=0
-[ "$1" = "--short" ] && SHORT=1
+[ "${1:-}" = "--short" ] && SHORT=1
 
 [ -r "$P/capacity" ] || { echo "batt: cannot read $P" >&2; exit 1; }
 
@@ -24,8 +31,9 @@ awk -v cap="$(cat $P/capacity)" \
     -v st="$(cat $P/status)"   \
     -v uv="$(cat $P/voltage_now)" \
     -v ua="$(cat $P/current_now)" \
-    -v ac="$(cat $PSDIR/ac/online 2>/dev/null || echo 0)" \
-    -v usb="$(cat $PSDIR/usb/online 2>/dev/null || echo 0)" \
+    -v chg="$(cat $P/charge_now 2>/dev/null)" \
+    -v ac="$(cat $AC/online 2>/dev/null || echo 0)" \
+    -v usb="$(cat $USB/online 2>/dev/null || echo 0)" \
     -v short="$SHORT" '
 BEGIN {
   # mAh per 1% for each band. The index is floor(cap/10); awk arrays start at 1, so look up with +1.
@@ -41,9 +49,14 @@ BEGIN {
 
   # Sum the charge that flows while the displayed value is c, starting from c=0. 100% is momentary, so cap at 99
   # (otherwise the result is one step too large when fully charged).
-  top = (cap > 99 ? 99 : cap)
-  rem = 0
-  for (c = 0; c <= top; c++) rem += mah[int(c/10)+1]
+  # With charge_now (uAh, kernel 6.18) the gauge reports the remaining charge itself.
+  if (chg != "") {
+    rem = chg/1000
+  } else {
+    top = (cap > 99 ? 99 : cap)
+    rem = 0
+    for (c = 0; c <= top; c++) rem += mah[int(c/10)+1]
+  }
 
   if (short) {
     printf "%d%%", cap

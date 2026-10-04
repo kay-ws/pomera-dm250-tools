@@ -26,7 +26,11 @@ NAME=${1:-${BT_MOUSE:-}}   # device name: argument, or BT_MOUSE in the environme
 if [ -z "$NAME" ]; then
 	echo "usage: bt-mouse DEVICE_NAME   (or set BT_MOUSE in the environment)" >&2
 	echo "bonded devices:" >&2
-	sudo grep -rh --include=info "^Name=" /var/lib/bluetooth/ 2>/dev/null | cut -d= -f2- | sort -u | sed "s/^/  /" >&2
+	if [ -x /opt/bin/bt_switch ]; then
+		sudo grep -rh --include=info "^Name=" /var/lib/bluetooth/ 2>/dev/null | cut -d= -f2- | sort -u | sed "s/^/  /" >&2
+	else
+		bluetoothctl devices Paired 2>/dev/null | cut -d" " -f3- | sort -u | sed "s/^/  /" >&2
+	fi
 	exit 2
 fi
 
@@ -57,54 +61,80 @@ os.close(fd)" 2>/dev/null || true
 }
 
 # --- 1. bring up hci0 ---
-if have_hci0; then
-	echo "hci0: already up"
-else
-	echo "hci0: powering on..."
-	sudo /opt/bin/bt_switch off >/dev/null 2>&1
-	sleep 5
-	# bt_switch on sleeps 3 s and then starts patchram; that first open of the UART is the one that dies
-	# (see 1. above). Prime the port during the wait so CTS is already high by then.
-	# Detach stdout/stderr/stdin: the patchram it leaves running would otherwise hold a caller's pipe
-	# (or an ssh channel) open, and `ssh dm250 bt-mouse ...` would never return.
-	sudo /opt/bin/bt_switch on >/dev/null 2>&1 </dev/null &
-	switch_pid=$!
-	sleep 1.2
-	prime_uart
-	wait "$switch_pid" || exit 1
-
-	# first try (hci0 normally appears ~9 s after patchram starts); restart patchram if it does not
-	if wait_hci0 30; then
-		echo "hci0: up on first try"
+# Kernel 3.10 image (has /opt/bin/bt_switch): patchram has to be started from user space.
+bring_up_310() {
+	if have_hci0; then
+		echo "hci0: already up"
 	else
-		echo "hci0: first try timed out, retrying patchram"
-		sudo pkill -f "[b]rcm_patchram" 2>/dev/null
-		sleep 2
-		start_patchram
-		if wait_hci0 40; then
-			echo "hci0: up on retry"
+		echo "hci0: powering on..."
+		sudo /opt/bin/bt_switch off >/dev/null 2>&1
+		sleep 5
+		# bt_switch on sleeps 3 s and then starts patchram; that first open of the UART is the one that dies
+		# (see 1. above). Prime the port during the wait so CTS is already high by then.
+		# Detach stdout/stderr/stdin: the patchram it leaves running would otherwise hold a caller's pipe
+		# (or an ssh channel) open, and `ssh dm250 bt-mouse ...` would never return.
+		sudo /opt/bin/bt_switch on >/dev/null 2>&1 </dev/null &
+		switch_pid=$!
+		sleep 1.2
+		prime_uart
+		wait "$switch_pid" || exit 1
+
+		# first try (hci0 normally appears ~9 s after patchram starts); restart patchram if it does not
+		if wait_hci0 30; then
+			echo "hci0: up on first try"
 		else
-			echo "hci0: FAILED -- check /dev/ttyS0 and $FW" >&2
-			exit 1
+			echo "hci0: first try timed out, retrying patchram"
+			sudo pkill -f "[b]rcm_patchram" 2>/dev/null
+			sleep 2
+			start_patchram
+			if wait_hci0 40; then
+				echo "hci0: up on retry"
+			else
+				echo "hci0: FAILED -- check /dev/ttyS0 and $FW" >&2
+				exit 1
+			fi
 		fi
 	fi
-fi
 
-# Stopping/starting bluetoothd can leave hci0 DOWN
-sudo hciconfig hci0 up 2>/dev/null
-systemctl is-active --quiet bluetooth || sudo systemctl start bluetooth
-sleep 2
-if ! bluetoothctl list 2>/dev/null | grep -q Controller; then
-	echo "adapter: re-registering"
-	sudo systemctl restart bluetooth
-	sleep 5
+	# Stopping/starting bluetoothd can leave hci0 DOWN
 	sudo hciconfig hci0 up 2>/dev/null
+	systemctl is-active --quiet bluetooth || sudo systemctl start bluetooth
+	sleep 2
+	if ! bluetoothctl list 2>/dev/null | grep -q Controller; then
+		echo "adapter: re-registering"
+		sudo systemctl restart bluetooth
+		sleep 5
+		sudo hciconfig hci0 up 2>/dev/null
+	fi
+}
+
+# Kernel 6.18 image: the kernel's hci_uart_bcm driver loads the firmware and brings hci0 up by itself
+# (at 1.5Mbps, from the device tree), so none of the patchram handling above applies. hci0 is missing only
+# after `bluetooth_power off`. Nothing here needs root unless the radio has to be powered on.
+bring_up_618() {
+	if [ "$(bluetooth_power status 2>/dev/null)" = on ]; then
+		echo "hci0: already up"
+	else
+		echo "hci0: powering on..."
+		sudo bluetooth_power on || exit 1
+	fi
+	systemctl is-active --quiet bluetooth || sudo systemctl start bluetooth
+	bluetoothctl show 2>/dev/null | grep -q "Powered: yes" || bluetoothctl power on >/dev/null 2>&1
+}
+
+if [ -x /opt/bin/bt_switch ]; then
+	bring_up_310
+else
+	bring_up_618
 fi
 
 # --- 2. find the bonded device (the address changes with every pairing) ---
 # WARNING: do not use a glob: /var/lib/bluetooth is readable only by root, and `*` is expanded by
 # the calling shell, so even with sudo it does not match and silently finds nothing
-ADDR=$(sudo grep -rl --include=info "^Name=$NAME\$" /var/lib/bluetooth/ 2>/dev/null |
+# bluetoothctl can list them without root; the grep is the fallback for an older BlueZ.
+ADDR=$(bluetoothctl devices Paired 2>/dev/null | awk -v n="$NAME" '
+	$1 == "Device" { a = $2; sub(/^Device [^ ]+ /, ""); if ($0 == n) { print a; exit } }')
+[ -n "$ADDR" ] || [ ! -x /opt/bin/bt_switch ] || ADDR=$(sudo grep -rl --include=info "^Name=$NAME\$" /var/lib/bluetooth/ 2>/dev/null |
 	head -1 | xargs -r dirname | xargs -r basename)
 if [ -z "$ADDR" ]; then
 	echo "no bonded device named '$NAME'." >&2

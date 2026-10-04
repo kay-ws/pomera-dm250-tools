@@ -1,7 +1,10 @@
 #!/bin/sh
 # bl -- show / change the backlight brightness.
 #
-# weston's alt+F9 / alt+F10 only work with the DRM backend. The fbdev backend does not set
+# Works on both kernels: 3.10 (rk28_bl, root-only sysfs) and 6.18 (backlight, writable by the
+# video group through the image's udev rule).
+#
+# On 3.10, weston's alt+F9 / alt+F10 only work with the DRM backend. The fbdev backend does not set
 # output->set_backlight, so backlight_binding silently returns
 # (no error or warning is shown, so it just looks like "the keys do nothing"). Write to sysfs directly.
 #
@@ -11,18 +14,32 @@
 #   bl -20    darker (relative)
 set -u
 
-BL=/sys/class/backlight/rk28_bl
+BL=
+MIN=1
+for d in /sys/class/backlight/backlight /sys/class/backlight/rk28_bl; do
+	[ -r "$d/brightness" ] || continue
+	BL=$d
+	# same floor as the 6.18 image's own `backlight` command
+	[ "${d##*/}" = backlight ] && MIN=41
+	break
+done
+[ -n "$BL" ] || { echo "bl: no backlight device found" >&2; exit 1; }
 MAX=$(cat "$BL/max_brightness")
 CUR=$(cat "$BL/brightness")
 
 case "${1:-}" in
 	"")     echo "$CUR / $MAX"; exit 0 ;;
-	+*|-*)  NEW=$((CUR $1)) ;;
+	+*|-*)  case "${1#[+-]}" in ""|*[!0-9]*) echo "usage: bl [N | +N | -N]" >&2; exit 1 ;; esac
+	        NEW=$((CUR $1)) ;;
 	*[!0-9]*) echo "usage: bl [N | +N | -N]" >&2; exit 1 ;;
 	*)      NEW=$1 ;;
 esac
 
-[ "$NEW" -lt 1 ] && NEW=1
+[ "$NEW" -lt "$MIN" ] && NEW=$MIN
 [ "$NEW" -gt "$MAX" ] && NEW=$MAX
-sudo sh -c "echo $NEW > $BL/brightness"
+if [ -w "$BL/brightness" ]; then
+	echo "$NEW" > "$BL/brightness"
+else
+	sudo sh -c "echo $NEW > $BL/brightness"
+fi
 echo "$CUR -> $NEW / $MAX"

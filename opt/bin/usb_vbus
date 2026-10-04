@@ -1,13 +1,18 @@
 #!/usr/bin/python3
 """usb_vbus on|off|status --- manual control of USB host power (VBUS 5V)
 
-This kernel has no code path that turns VBUS on. Nothing sends the USB_OTG_POWER_ON
+Kernel 3.10 has no code path that turns VBUS on. Nothing sends the USB_OTG_POWER_ON
 notification that enables the PMIC(RK818) boost converter; only the receiver exists.
 So the register is written directly over i2c.
 
 Using a device in USB host mode requires both of the following:
   1. force_usb_mode = 1   (same as usb_host on; done by usb_host.service at boot)
   2. RK818 0x23 bit7      (OTG_EN; nothing else sets it, so it is done by hand)
+
+Kernel 6.18: the port is host-only in the device tree (no force_usb_mode), and the same bit is the
+OTG_SWITCH regulator, which has no consumer -- the image's usb_host deliberately leaves VBUS alone.
+The bit is still written over i2c, behind the rk808 driver's back: its register cache does not see
+the change, so the driver can clear the bit again whenever it next updates register 0x23.
 """
 import fcntl
 import os
@@ -19,8 +24,11 @@ RK818_ADDR = 0x1C
 I2C_SLAVE_FORCE = 0x0706
 DCDC_EN_REG = 0x23
 OTG_EN = 0x80
-FORCE_MODE = "/sys/bus/platform/drivers/usb20_otg/force_usb_mode"
-CURRENT_NOW = "/sys/class/power_supply/battery/current_now"
+FORCE_MODE = "/sys/bus/platform/drivers/usb20_otg/force_usb_mode"    # kernel 3.10 only
+DWC2_BOUND = "/sys/bus/platform/drivers/dwc2/10180000.usb"            # kernel 6.18 (usb_host on)
+CURRENT_NOW = next((p for p in ("/sys/class/power_supply/battery/current_now",
+                                "/sys/class/power_supply/BATTERY/current_now")
+                    if os.path.exists(p)), "")
 
 # Reading back right after a write can return a stale value, so wait before checking
 SETTLE = 1.5
@@ -83,8 +91,12 @@ def show_status():
     print("i2c      : %s addr=0x%02x reg=0x%02x bit%d (I2C_SLAVE_FORCE=0x%04x)"
           % (I2C_DEV, RK818_ADDR, DCDC_EN_REG, OTG_EN.bit_length() - 1, I2C_SLAVE_FORCE))
 
-    mode = read_file(FORCE_MODE)
-    print("USB mode : %s (force_usb_mode=%s)" % ("host" if mode == "1" else "device", mode))
+    if os.path.exists(FORCE_MODE):
+        mode = read_file(FORCE_MODE)
+        print("USB mode : %s (force_usb_mode=%s)" % ("host" if mode == "1" else "device", mode))
+    else:
+        print("USB mode : host %s (dwc2 %s)" % (("on", "bound") if os.path.exists(DWC2_BOUND)
+                                                else ("off", "unbound; run usb_host on")))
 
     current = read_file(CURRENT_NOW)
     if current is not None:
@@ -111,7 +123,7 @@ def turn_on():
         return 0
 
     # Outside host mode, devices stay invisible even with 5V applied
-    if read_file(FORCE_MODE) != "1":
+    if os.path.exists(FORCE_MODE) and read_file(FORCE_MODE) != "1":
         with open(FORCE_MODE, "w") as f:
             f.write("1")
         print("set force_usb_mode to 1 (host mode)")

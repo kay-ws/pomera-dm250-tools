@@ -23,7 +23,11 @@ NAME=${1:-${BT_SPEAKER:-}}   # device name: argument, or BT_SPEAKER in the envir
 if [ -z "$NAME" ]; then
 	echo "usage: bt-speaker DEVICE_NAME   (or set BT_SPEAKER in the environment)" >&2
 	echo "bonded devices:" >&2
-	sudo grep -rh --include=info "^Name=" /var/lib/bluetooth/ 2>/dev/null | cut -d= -f2- | sort -u | sed "s/^/  /" >&2
+	if [ -x /opt/bin/bt_switch ]; then
+		sudo grep -rh --include=info "^Name=" /var/lib/bluetooth/ 2>/dev/null | cut -d= -f2- | sort -u | sed "s/^/  /" >&2
+	else
+		bluetoothctl devices Paired 2>/dev/null | cut -d" " -f3- | sort -u | sed "s/^/  /" >&2
+	fi
 	exit 2
 fi
 CODEC=${BT_SPEAKER_CODEC:-sbc}   # for better quality use BT_SPEAKER_CODEC=sbc_xq_453 (slightly more dropouts)
@@ -57,48 +61,74 @@ os.close(fd)" 2>/dev/null || true
 }
 
 # --- 1. bring up hci0 (same as bt-mouse) ---
-if have_hci0; then
-	echo "hci0: already up"
-else
-	echo "hci0: powering on... (about 10 s)"
-	sudo /opt/bin/bt_switch off >/dev/null 2>&1
-	sleep 5
-	# bt_switch on sleeps 3 s and then starts patchram; that first open of the UART is the one that dies
-	# (see 1. above). Prime the port during the wait so CTS is already high by then.
-	sudo /opt/bin/bt_switch on >/dev/null 2>&1 </dev/null &   # detached (see bt-mouse)
-	switch_pid=$!
-	sleep 1.2
-	prime_uart
-	wait "$switch_pid" || exit 1
-	if wait_hci0 30; then
-		echo "hci0: up on first try"
+# Kernel 3.10 image (has /opt/bin/bt_switch): patchram has to be started from user space.
+bring_up_310() {
+	if have_hci0; then
+		echo "hci0: already up"
 	else
-		echo "hci0: first try timed out, retrying patchram"
-		sudo pkill -f "[b]rcm_patchram" 2>/dev/null
-		sleep 2
-		start_patchram
-		if wait_hci0 40; then
-			echo "hci0: up on retry"
+		echo "hci0: powering on... (about 10 s)"
+		sudo /opt/bin/bt_switch off >/dev/null 2>&1
+		sleep 5
+		# bt_switch on sleeps 3 s and then starts patchram; that first open of the UART is the one that dies
+		# (see 1. above). Prime the port during the wait so CTS is already high by then.
+		sudo /opt/bin/bt_switch on >/dev/null 2>&1 </dev/null &   # detached (see bt-mouse)
+		switch_pid=$!
+		sleep 1.2
+		prime_uart
+		wait "$switch_pid" || exit 1
+		if wait_hci0 30; then
+			echo "hci0: up on first try"
 		else
-			echo "hci0: FAILED -- check /dev/ttyS0 and $FW" >&2
-			exit 1
+			echo "hci0: first try timed out, retrying patchram"
+			sudo pkill -f "[b]rcm_patchram" 2>/dev/null
+			sleep 2
+			start_patchram
+			if wait_hci0 40; then
+				echo "hci0: up on retry"
+			else
+				echo "hci0: FAILED -- check /dev/ttyS0 and $FW" >&2
+				exit 1
+			fi
 		fi
 	fi
-fi
 
-sudo hciconfig hci0 up 2>/dev/null
-systemctl is-active --quiet bluetooth || sudo systemctl start bluetooth
-sleep 2
-if ! bluetoothctl list 2>/dev/null | grep -q Controller; then
-	echo "adapter: re-registering"
-	sudo systemctl restart bluetooth
-	sleep 5
 	sudo hciconfig hci0 up 2>/dev/null
+	systemctl is-active --quiet bluetooth || sudo systemctl start bluetooth
+	sleep 2
+	if ! bluetoothctl list 2>/dev/null | grep -q Controller; then
+		echo "adapter: re-registering"
+		sudo systemctl restart bluetooth
+		sleep 5
+		sudo hciconfig hci0 up 2>/dev/null
+	fi
+}
+
+# Kernel 6.18 image: the kernel's hci_uart_bcm driver loads the firmware and brings hci0 up by itself
+# (at 1.5Mbps, from the device tree), so none of the patchram handling above applies. hci0 is missing only
+# after `bluetooth_power off`. Nothing here needs root unless the radio has to be powered on.
+bring_up_618() {
+	if [ "$(bluetooth_power status 2>/dev/null)" = on ]; then
+		echo "hci0: already up"
+	else
+		echo "hci0: powering on..."
+		sudo bluetooth_power on || exit 1
+	fi
+	systemctl is-active --quiet bluetooth || sudo systemctl start bluetooth
+	bluetoothctl show 2>/dev/null | grep -q "Powered: yes" || bluetoothctl power on >/dev/null 2>&1
+}
+
+if [ -x /opt/bin/bt_switch ]; then
+	bring_up_310
+else
+	bring_up_618
 fi
 
 # --- 2. find the bonded device by name ---
 # WARNING: do not use a glob: /var/lib/bluetooth is readable only by root, so the calling shell cannot expand it
-ADDR=$(sudo grep -rl --include=info "^Name=$NAME\$" /var/lib/bluetooth/ 2>/dev/null |
+# bluetoothctl can list them without root; the grep is the fallback for an older BlueZ.
+ADDR=$(bluetoothctl devices Paired 2>/dev/null | awk -v n="$NAME" '
+	$1 == "Device" { a = $2; sub(/^Device [^ ]+ /, ""); if ($0 == n) { print a; exit } }')
+[ -n "$ADDR" ] || [ ! -x /opt/bin/bt_switch ] || ADDR=$(sudo grep -rl --include=info "^Name=$NAME\$" /var/lib/bluetooth/ 2>/dev/null |
 	head -1 | xargs -r dirname | xargs -r basename)
 if [ -z "$ADDR" ]; then
 	echo "no bonded device named '$NAME'." >&2
@@ -106,7 +136,6 @@ if [ -z "$ADDR" ]; then
 	exit 1
 fi
 echo "device: $NAME ($ADDR)"
-SINK="bluez_sink.${ADDR//:/_}.a2dp_sink"
 
 # --- 3. connect (the speaker must be powered on) ---
 for t in 1 2 3; do
@@ -121,24 +150,32 @@ if ! bluetoothctl info "$ADDR" 2>/dev/null | grep -q "Connected: yes"; then
 fi
 echo "connected."
 
-# --- 4. wait for the PulseAudio sink to appear, then make it the default output ---
+# --- 4. wait for the sink to appear, then make it the default output ---
+# The sink is bluez_sink.<addr>.a2dp_sink on PulseAudio (3.10 image) and bluez_output.<addr>.1 on
+# PipeWire (6.18 image), so look it up by the address.
+find_sink() { pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -m1 "${ADDR//:/_}"; }
+SINK=
 for i in 1 2 3 4 5 6 7 8 9 10; do
-	pactl list short sinks 2>/dev/null | grep -q "$SINK" && break
+	SINK=$(find_sink) && break
 	sleep 1
 done
-if ! pactl list short sinks 2>/dev/null | grep -q "$SINK"; then
-	echo "sink $SINK did not appear (profile may not be a2dp_sink)" >&2
+if [ -z "$SINK" ]; then
+	echo "no sink for $ADDR appeared (profile may not be a2dp)" >&2
 	exit 1
 fi
 CARD="bluez_card.${ADDR//:/_}"
-if [ "$(pactl send-message /card/$CARD/bluez get-codec 2>/dev/null | tr -d '"')" != "$CODEC" ]; then
-	pactl send-message /card/$CARD/bluez switch-codec "\"$CODEC\"" >/dev/null 2>&1
-	for i in 1 2 3 4 5 6 7 8 9 10; do   # switching recreates the sink, so wait for it to come back
-		sleep 1
-		pactl list short sinks 2>/dev/null | grep -q "$SINK" && break
-	done
-fi
-echo "codec: $(pactl send-message /card/$CARD/bluez get-codec 2>/dev/null | tr -d '"')"
+# The codec is forced only on PulseAudio. On PipeWire it is left to WirePlumber's choice.
+case $SINK in bluez_sink.*)
+	if [ "$(pactl send-message /card/$CARD/bluez get-codec 2>/dev/null | tr -d '"')" != "$CODEC" ]; then
+		pactl send-message /card/$CARD/bluez switch-codec "\"$CODEC\"" >/dev/null 2>&1
+		for i in 1 2 3 4 5 6 7 8 9 10; do   # switching recreates the sink, so wait for it to come back
+			sleep 1
+			find_sink >/dev/null && break
+		done
+	fi
+	echo "codec: $(pactl send-message /card/$CARD/bluez get-codec 2>/dev/null | tr -d '"')"
+	;;
+esac
 pactl set-default-sink "$SINK" 2>/dev/null
 # also move audio that is already playing to the speaker
 for id in $(pactl list short sink-inputs 2>/dev/null | awk '{print $1}'); do
