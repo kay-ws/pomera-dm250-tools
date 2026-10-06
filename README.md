@@ -18,7 +18,7 @@ DM200 と DM250US では試していません。`usb_vbus` のように、DM250 
 
 ## 中身
 
-置き場所は、DM250 の上でのパスと同じにしてあります。`usb_vbus` だけは例外で、kernel 6.18 のイメージには `/opt/bin` が無いので `/usr/local/bin` に置きます。
+置き場所は、DM250 の上でのパスと同じにしてあります。
 
 ### コマンド
 
@@ -29,7 +29,7 @@ DM200 と DM250US では試していません。`usb_vbus` のように、DM250 
 | `usr/local/bin/battlog.sh` | 電池の状態を5分ごとに記録する | 動作を確認 |
 | `usr/local/bin/bt-speaker` | ペアリング済みのスピーカーに繋ぎ、既定の出力にする | 動作を確認（PipeWire） |
 | `usr/local/bin/bt-mouse` | ペアリング済みの LE マウスに繋ぐ | 接続まで。マウスは動かない（下記） |
-| `opt/bin/usb_vbus` | USB ホストの 5V（VBUS）を入れる・切る | 動作を確認（USB マウスの直挿し） |
+| `usr/local/bin/usb_vbus` | USB ホストの 5V（VBUS）を入れる・切る | 動作を確認（USB マウスの直挿し） |
 
 `bl`・`batt`・`battlog.sh`・`usb_vbus` は sysfs のパスを見て、`bt-mouse`・`bt-speaker` は `/opt/bin/bt_switch` の有無を見て、kernel 3.10 と 6.18 を切り替えます。3.10 側の処理は残してありますが、この変更を入れた後の版を 3.10 の実機では動かしていません。
 
@@ -57,7 +57,7 @@ DM200 と DM250US では試していません。`usb_vbus` のように、DM250 
 ## 導入
 
 ```sh
-sudo install -m 755 usr/local/bin/* opt/bin/usb_vbus /usr/local/bin/
+sudo install -m 755 usr/local/bin/* /usr/local/bin/
 install -D -m 755 home/pomera/.local/bin/batt ~/.local/bin/batt
 
 sudo install -m 644 etc/systemd/system/battlog.service /etc/systemd/system/
