@@ -6,7 +6,7 @@ Small scripts, systemd units and key settings for using the Pomera DM250 as a Li
 
 Linux 化そのものは [ichinomoto さんの SD イメージ](https://www.ekesete.net/log/?p=9565)（kernel 6.18 + Debian 13 trixie）を使わせてもらっています。ここにあるのは、その上で使うための道具です。
 
-このブランチ（`kernel-6.18`）は、kernel 6.18 のイメージ向けです。kernel 3.10 のキット（`pomera_dm2x0_debian_20220816`）向けの説明は、`main` ブランチの README にあります。
+`main` ブランチは、kernel 6.18 のイメージ向けです。kernel 3.10 のキット（`pomera_dm2x0_debian_20220816`）向けの版と説明は、タグ [`kernel-3.10`](https://github.com/kay-ws/pomera-dm250-tools/tree/kernel-3.10) にあります。3.10 の実機で動作を確認したのは、このタグの版までです。
 
 ## 動作を確認した環境
 
