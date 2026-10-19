@@ -51,7 +51,8 @@ tail -n 8 "$LOG" 2>/dev/null | awk -F'\t' -v cap="$(cat $P/capacity)" \
     -v short="$SHORT" '
 function fmt(h) { return (h < 1) ? sprintf("%dmin", h*60) : sprintf("%.1fh", h) }
 # Discharging samples of the last 35 minutes. A line cut short by a forced power-off is skipped.
-NF == 8 && $1 ~ /^[0-9]+$/ && $3 == "Discharging" && $6 < 0 && now - $1 >= 0 && now - $1 <= 2100 {
+# The log had 8 columns and now has 9 (usb_type), so accept both; a cut line has fewer than 8.
+NF >= 8 && $1 ~ /^[0-9]+$/ && $3 == "Discharging" && $6 < 0 && now - $1 >= 0 && now - $1 <= 2100 {
   sum += -$6/1e3; n++
 }
 END {

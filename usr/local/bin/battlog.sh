@@ -5,16 +5,21 @@
 # WARNING: resuming from suspend can shift the clock by +9h. Exclude epoch discontinuities when analyzing.
 # The interval is 5 minutes, and 1 minute below 3.6V: the last half hour before the battery runs out is
 # where the moment of power-off and the charge left at that moment are read from.
+# usb_type is what the charger detection decided (the bracketed entry of USB/usb_type, e.g. DCP for a
+# charger plugged in directly). "Charging" alone does not tell how much current is allowed. 3.10 has no
+# such file, so "-" is logged there. Lines written before this column was added have 8 columns.
 LOG=/home/pomera/battlog.tsv
 B=/sys/class/power_supply/battery
 [ -e "$B" ] || B=/sys/class/power_supply/BATTERY
+U=/sys/class/power_supply/USB/usb_type
 rd() { cat "$B/$1" 2>/dev/null || echo -; }
-[ -e "$LOG" ] || printf "epoch\tdatetime\tstatus\tcap\tvolt_uV\tcur_uA\ttemp\tchg_uAh\n" > "$LOG"
+utype() { t=$(sed -n 's/.*\[\(.*\)\].*/\1/p' "$U" 2>/dev/null); echo "${t:--}"; }
+[ -e "$LOG" ] || printf "epoch\tdatetime\tstatus\tcap\tvolt_uV\tcur_uA\ttemp\tchg_uAh\tusb_type\n" > "$LOG"
 while :; do
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "$(date +%s)" "$(date +%Y-%m-%dT%H:%M:%S)" \
     "$(rd status)" "$(rd capacity)" \
-    "$(rd voltage_now)" "$(rd current_now)" "$(rd temp)" "$(rd charge_now)" >> "$LOG"
+    "$(rd voltage_now)" "$(rd current_now)" "$(rd temp)" "$(rd charge_now)" "$(utype)" >> "$LOG"
   v=$(rd voltage_now)
   if [ "$v" -lt 3600000 ] 2>/dev/null; then sleep 60; else sleep 300; fi
 done
